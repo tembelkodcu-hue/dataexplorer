@@ -1,5 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { DatabaseService } from "@/lib/database"
+import { DatabaseService } from "@/lib"
 
 export async function GET() {
   try {
@@ -49,18 +49,44 @@ export async function POST(request: NextRequest) {
 
     // If creating a table, also create the dynamic table record
     if (item_type === "table") {
-      const tableName = name
-        .toLowerCase()
-        .replace(/\s+/g, "_")
-        .replace(/[^a-z0-9_]/g, "")
+      try {
+        const tableName = name
+          .toLowerCase()
+          .replace(/\s+/g, "_")
+          .replace(/[^a-z0-9_]/g, "")
+          .substring(0, 64); // MySQL table name length limit
 
-      console.log("Creating dynamic table record...")
-      await DatabaseService.createDynamicTable({
-        sidebar_item_id: newItem.id,
-        table_name: tableName,
-        display_name: name,
-        description: `Dynamic table: ${name}`,
-      })
+        console.log("Creating dynamic table record...", {
+          sidebar_item_id: newItem.id,
+          table_name: tableName,
+          display_name: name
+        });
+
+        const dynamicTable = await DatabaseService.createDynamicTable({
+          sidebar_item_id: newItem.id,
+          table_name: tableName,
+          display_name: name,
+          description: `Dynamic table: ${name}`,
+        });
+
+        console.log("Successfully created dynamic table:", dynamicTable);
+
+        // Add a default column if needed
+        // await DatabaseService.createTableColumn({
+        //   table_id: dynamicTable.id,
+        //   column_name: "id",
+        //   display_name: "ID",
+        //   data_type: "number",
+        //   is_required: true,
+        //   sort_order: 0,
+        //   width: 100
+        // });
+      } catch (error) {
+        console.error("Error creating dynamic table:", error);
+        // Delete the sidebar item since table creation failed
+        await DatabaseService.deleteSidebarItem(newItem.id);
+        throw error;
+      }
     }
 
     console.log("Successfully created sidebar item:", newItem)

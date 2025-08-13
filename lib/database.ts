@@ -1,9 +1,4 @@
-import { neon } from "@neondatabase/serverless"
-
-// Use the available environment variable
-const sql = neon(process.env.DATABASE_URL_UNPOOLED!)
-
-export { sql }
+import { sql } from './mysql';
 
 // Database types
 export interface SidebarItem {
@@ -57,61 +52,67 @@ export class DatabaseService {
       // Create sidebar_items table
       await sql`
         CREATE TABLE IF NOT EXISTS sidebar_items (
-          id SERIAL PRIMARY KEY,
+          id INT AUTO_INCREMENT PRIMARY KEY,
           name VARCHAR(255) NOT NULL,
-          parent_id INTEGER REFERENCES sidebar_items(id) ON DELETE CASCADE,
-          item_type VARCHAR(20) NOT NULL CHECK (item_type IN ('folder', 'table')),
+          parent_id INT,
+          item_type ENUM('folder', 'table') NOT NULL,
           icon VARCHAR(50),
-          sort_order INTEGER DEFAULT 0,
-          created_at TIMESTAMP DEFAULT NOW(),
-          updated_at TIMESTAMP DEFAULT NOW()
-        )
+          sort_order INT DEFAULT 0,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          FOREIGN KEY (parent_id) REFERENCES sidebar_items(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB
       `
 
       // Create dynamic_tables table
       await sql`
         CREATE TABLE IF NOT EXISTS dynamic_tables (
-          id SERIAL PRIMARY KEY,
-          sidebar_item_id INTEGER REFERENCES sidebar_items(id) ON DELETE CASCADE,
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          sidebar_item_id INT NOT NULL,
           table_name VARCHAR(255) NOT NULL,
           display_name VARCHAR(255) NOT NULL,
           description TEXT,
-          created_at TIMESTAMP DEFAULT NOW(),
-          updated_at TIMESTAMP DEFAULT NOW()
-        )
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          FOREIGN KEY (sidebar_item_id) REFERENCES sidebar_items(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB
       `
 
       // Create table_columns table
       await sql`
         CREATE TABLE IF NOT EXISTS table_columns (
-          id SERIAL PRIMARY KEY,
-          table_id INTEGER REFERENCES dynamic_tables(id) ON DELETE CASCADE,
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          table_id INT NOT NULL,
           column_name VARCHAR(255) NOT NULL,
           display_name VARCHAR(255) NOT NULL,
-          data_type VARCHAR(20) NOT NULL CHECK (data_type IN ('text', 'number', 'date', 'boolean', 'decimal', 'double', 'checkbox')),
+          data_type ENUM('text', 'number', 'date', 'boolean', 'decimal', 'double', 'checkbox') NOT NULL,
           is_required BOOLEAN DEFAULT FALSE,
           default_value TEXT,
-          sort_order INTEGER DEFAULT 0,
-          width INTEGER DEFAULT 150,
-          created_at TIMESTAMP DEFAULT NOW(),
-          updated_at TIMESTAMP DEFAULT NOW()
-        )
+          sort_order INT DEFAULT 0,
+          width INT DEFAULT 150,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          FOREIGN KEY (table_id) REFERENCES dynamic_tables(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB
       `
 
       // Create table_data table
       await sql`
         CREATE TABLE IF NOT EXISTS table_data (
-          id SERIAL PRIMARY KEY,
-          table_id INTEGER REFERENCES dynamic_tables(id) ON DELETE CASCADE,
-          row_data JSONB NOT NULL,
-          created_at TIMESTAMP DEFAULT NOW(),
-          updated_at TIMESTAMP DEFAULT NOW()
-        )
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          table_id INT NOT NULL,
+          row_data JSON NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          FOREIGN KEY (table_id) REFERENCES dynamic_tables(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB
       `
 
       // Check if we need to seed initial data
-      const existingItems = await sql`SELECT COUNT(*) as count FROM sidebar_items`
-      if (existingItems[0].count === 0) {
+      const [result] = await sql<[{ count: number }]>`
+        SELECT COUNT(*) as count FROM sidebar_items
+      `;
+      if (result.count === 0) {
         await this.seedInitialData()
       }
     } catch (error) {
@@ -123,43 +124,84 @@ export class DatabaseService {
   static async seedInitialData(): Promise<void> {
     try {
       // Create root "Tables" folder
-      const tablesFolder = await sql`
+      await sql`
         INSERT INTO sidebar_items (name, parent_id, item_type, icon, sort_order)
         VALUES ('Tables', NULL, 'folder', 'folder', 0)
-        RETURNING *
-      `
+      `;
+      
+      const [tablesFolder] = await sql<SidebarItem[]>`
+        SELECT * FROM sidebar_items WHERE id = LAST_INSERT_ID()
+      `;
+
+      if (!tablesFolder) {
+        throw new Error('Failed to create root folder');
+      }
 
       // Create sample table sidebar item
-      const sampleTableItem = await sql`
+      await sql`
         INSERT INTO sidebar_items (name, parent_id, item_type, icon, sort_order)
-        VALUES ('Sample Customers', ${tablesFolder[0].id}, 'table', 'table', 0)
-        RETURNING *
-      `
+        VALUES ('Sample Customers', ${tablesFolder.id}, 'table', 'table', 0)
+      `;
+
+      const [sampleTableItem] = await sql<SidebarItem[]>`
+        SELECT * FROM sidebar_items WHERE id = LAST_INSERT_ID()
+      `;
+
+      if (!sampleTableItem) {
+        throw new Error('Failed to create sample table item');
+      }
 
       // Create the dynamic table
-      const dynamicTable = await sql`
+      await sql`
         INSERT INTO dynamic_tables (sidebar_item_id, table_name, display_name, description)
-        VALUES (${sampleTableItem[0].id}, 'sample_customers', 'Sample Customers', 'A sample customer table to get you started')
-        RETURNING *
-      `
+        VALUES (${sampleTableItem.id}, 'sample_customers', 'Sample Customers', 'A sample customer table to get you started')
+      `;
+
+      const [dynamicTable] = await sql<DynamicTable[]>`
+        SELECT * FROM dynamic_tables WHERE id = LAST_INSERT_ID()
+      `;
+
+      if (!dynamicTable) {
+        throw new Error('Failed to create dynamic table');
+      }
 
       // Create sample columns
       await sql`
-        INSERT INTO table_columns (table_id, column_name, display_name, data_type, is_required, sort_order, width) VALUES
-        (${dynamicTable[0].id}, 'name', 'Customer Name', 'text', true, 0, 200),
-        (${dynamicTable[0].id}, 'email', 'Email Address', 'text', true, 1, 250),
-        (${dynamicTable[0].id}, 'phone', 'Phone Number', 'text', false, 2, 150),
-        (${dynamicTable[0].id}, 'active', 'Active', 'checkbox', false, 3, 100),
-        (${dynamicTable[0].id}, 'created_date', 'Created Date', 'date', false, 4, 150)
-      `
+        INSERT INTO table_columns (table_id, column_name, display_name, data_type, is_required, sort_order, width)
+        VALUES 
+        (${dynamicTable.id}, 'name', 'Customer Name', 'text', true, 0, 200),
+        (${dynamicTable.id}, 'email', 'Email Address', 'text', true, 1, 250),
+        (${dynamicTable.id}, 'phone', 'Phone Number', 'text', false, 2, 150),
+        (${dynamicTable.id}, 'active', 'Active', 'checkbox', false, 3, 100),
+        (${dynamicTable.id}, 'created_date', 'Created Date', 'date', false, 4, 150)
+      `;
 
       // Create sample data
       await sql`
-        INSERT INTO table_data (table_id, row_data) VALUES
-        (${dynamicTable[0].id}, '{"name": "John Doe", "email": "john@example.com", "phone": "+1-555-0123", "active": true, "created_date": "2024-01-15"}'),
-        (${dynamicTable[0].id}, '{"name": "Jane Smith", "email": "jane@example.com", "phone": "+1-555-0124", "active": true, "created_date": "2024-01-16"}'),
-        (${dynamicTable[0].id}, '{"name": "Bob Johnson", "email": "bob@example.com", "phone": "+1-555-0125", "active": false, "created_date": "2024-01-17"}')
-      `
+        INSERT INTO table_data (table_id, row_data)
+        VALUES
+        (${dynamicTable.id}, ${JSON.stringify({
+          name: "John Doe",
+          email: "john@example.com",
+          phone: "+1-555-0123",
+          active: true,
+          created_date: "2024-01-15"
+        })}),
+        (${dynamicTable.id}, ${JSON.stringify({
+          name: "Jane Smith",
+          email: "jane@example.com",
+          phone: "+1-555-0124",
+          active: true,
+          created_date: "2024-01-16"
+        })}),
+        (${dynamicTable.id}, ${JSON.stringify({
+          name: "Bob Johnson",
+          email: "bob@example.com",
+          phone: "+1-555-0125",
+          active: false,
+          created_date: "2024-01-17"
+        })})
+      `;
     } catch (error) {
       console.error("Error seeding initial data:", error)
       throw error
@@ -168,76 +210,190 @@ export class DatabaseService {
 
   static async getSidebarItems(): Promise<SidebarItem[]> {
     try {
-      const result = await sql`
+      return await sql<SidebarItem[]>`
         SELECT * FROM sidebar_items 
-        ORDER BY parent_id NULLS FIRST, sort_order, name
-      `
-      return result as SidebarItem[]
+        ORDER BY ISNULL(parent_id) DESC, sort_order, name
+      `;
     } catch (error: any) {
-      if (error.message?.includes('relation "sidebar_items" does not exist')) {
-        await this.initializeTables()
-        const result = await sql`
+      if (error.code === 'ER_NO_SUCH_TABLE') {
+        await this.initializeTables();
+        return await sql<SidebarItem[]>`
           SELECT * FROM sidebar_items 
-          ORDER BY parent_id NULLS FIRST, sort_order, name
-        `
-        return result as SidebarItem[]
+          ORDER BY ISNULL(parent_id) DESC, sort_order, name
+        `;
       }
-      throw error
+      throw error;
     }
   }
 
   static async createSidebarItem(item: Omit<SidebarItem, "id" | "created_at" | "updated_at">): Promise<SidebarItem> {
-    const result = await sql`
+    await sql`
       INSERT INTO sidebar_items (name, parent_id, item_type, icon, sort_order)
       VALUES (${item.name}, ${item.parent_id}, ${item.item_type}, ${item.icon}, ${item.sort_order})
-      RETURNING *
-    `
-    return result[0] as SidebarItem
+    `;
+    
+    const [result] = await sql<SidebarItem[]>`
+      SELECT * FROM sidebar_items WHERE id = LAST_INSERT_ID()
+    `;
+    
+    if (!result) {
+      throw new Error('Failed to create sidebar item');
+    }
+    
+    return result;
   }
 
   static async updateSidebarItem(id: number, updates: Partial<SidebarItem>): Promise<SidebarItem> {
-    const result = await sql`
-      UPDATE sidebar_items 
-      SET name = COALESCE(${updates.name}, name),
-          parent_id = COALESCE(${updates.parent_id}, parent_id),
-          item_type = COALESCE(${updates.item_type}, item_type),
-          icon = COALESCE(${updates.icon}, icon),
-          sort_order = COALESCE(${updates.sort_order}, sort_order),
-          updated_at = NOW()
-      WHERE id = ${id}
-      RETURNING *
-    `
-    return result[0] as SidebarItem
+    // Build the SET clause dynamically based on provided updates
+    const updateParts = [];
+    const values = [];
+    
+    if (updates.name !== undefined) {
+      updateParts.push('name = ?');
+      values.push(updates.name);
+    }
+    if (updates.parent_id !== undefined) {
+      updateParts.push('parent_id = ?');
+      values.push(updates.parent_id);
+    }
+    if (updates.item_type !== undefined) {
+      updateParts.push('item_type = ?');
+      values.push(updates.item_type);
+    }
+    if (updates.icon !== undefined) {
+      updateParts.push('icon = ?');
+      values.push(updates.icon);
+    }
+    if (updates.sort_order !== undefined) {
+      updateParts.push('sort_order = ?');
+      values.push(updates.sort_order);
+    }
+
+    // Add the ID to the values array
+    values.push(id);
+
+    // Execute the update query
+    await sql(
+      `UPDATE sidebar_items SET ${updateParts.join(', ')} WHERE id = ?`,
+      values
+    );
+
+    const [result] = await sql<SidebarItem[]>`
+      SELECT * FROM sidebar_items WHERE id = ${id}
+    `;
+
+    if (!result) {
+      throw new Error('Failed to update sidebar item');
+    }
+
+    return result;
   }
 
   static async deleteSidebarItem(id: number): Promise<void> {
-    await sql`DELETE FROM sidebar_items WHERE id = ${id}`
+    try {
+      console.log('Attempting to delete item:', id);
+      
+      // First check if the item exists
+      const rows = await sql<SidebarItem[]>(
+        'SELECT * FROM sidebar_items WHERE id = ?',
+        [id]
+      );
+
+      console.log('Query result:', rows);
+
+      const item = rows?.[0];
+      if (!item) {
+        throw new Error("Sidebar item not found");
+      }
+
+      console.log('Found item to delete:', item);
+
+      // Check for children
+      const [childrenResult] = await sql<[{ count: number }][]>(
+        'SELECT COUNT(*) as count FROM sidebar_items WHERE parent_id = ?',
+        [id]
+      );
+
+      if (childrenResult?.[0]?.count > 0) {
+        throw new Error("Cannot delete item with children. Please delete child items first.");
+      }
+
+                  // For tables, check data
+      if (item.item_type === 'table') {
+        const tables = await sql<DynamicTable[]>(
+          'SELECT * FROM dynamic_tables WHERE sidebar_item_id = ?',
+          [id]
+        );
+        
+        if (tables?.[0]) {
+          const tableId = tables[0].id;
+          const dataCount = await sql<{ count: number }[]>(
+            'SELECT COUNT(*) as count FROM table_data WHERE table_id = ?',
+            [tableId]
+          );
+          console.log(`Table has ${dataCount?.[0]?.count ?? 0} rows of data`);
+        }
+      }
+
+      // Check for children
+      const children = await sql<{ count: number }[]>(
+        'SELECT COUNT(*) as count FROM sidebar_items WHERE parent_id = ?',
+        [id]
+      );
+      const childCount = children?.[0]?.count ?? 0;
+      console.log('Child count:', childCount);
+
+      if (childCount > 0) {
+        throw new Error("Cannot delete item with children. Please delete child items first.");
+      }
+
+      // Delete the sidebar item (CASCADE will handle related records)
+      console.log('Deleting item:', id);
+      const result = await sql(
+        'DELETE FROM sidebar_items WHERE id = ?',
+        [id]
+      );
+      console.log('Delete result:', result);
+      console.log('Item deleted successfully');
+
+    } catch (error) {
+      console.error("Error in deleteSidebarItem:", error);
+      throw error;
+    }
   }
 
   // Table operations
   static async getDynamicTable(id: number): Promise<DynamicTable | null> {
-    const result = await sql`
+    const [result] = await sql<DynamicTable[]>`
       SELECT * FROM dynamic_tables WHERE id = ${id}
-    `
-    return (result[0] as DynamicTable) || null
+    `;
+    return result || null;
   }
 
   static async getDynamicTableBySidebarId(sidebarId: number): Promise<DynamicTable | null> {
-    const result = await sql`
+    const [result] = await sql<DynamicTable[]>`
       SELECT * FROM dynamic_tables WHERE sidebar_item_id = ${sidebarId}
-    `
-    return (result[0] as DynamicTable) || null
+    `;
+    return result || null;
   }
 
   static async createDynamicTable(
     table: Omit<DynamicTable, "id" | "created_at" | "updated_at">,
   ): Promise<DynamicTable> {
-    const result = await sql`
+    await sql`
       INSERT INTO dynamic_tables (sidebar_item_id, table_name, display_name, description)
       VALUES (${table.sidebar_item_id}, ${table.table_name}, ${table.display_name}, ${table.description})
-      RETURNING *
-    `
-    return result[0] as DynamicTable
+    `;
+
+    const [result] = await sql<DynamicTable[]>`
+      SELECT * FROM dynamic_tables WHERE id = LAST_INSERT_ID()
+    `;
+
+    if (!result) {
+      throw new Error('Failed to create dynamic table');
+    }
+
+    return result;
   }
 
   // Column operations
@@ -251,16 +407,25 @@ export class DatabaseService {
   }
 
   static async createTableColumn(column: Omit<TableColumn, "id" | "created_at" | "updated_at">): Promise<TableColumn> {
-    const result = await sql`
+    await sql`
       INSERT INTO table_columns (table_id, column_name, display_name, data_type, is_required, default_value, sort_order, width)
-      VALUES (${column.table_id}, ${column.column_name}, ${column.display_name}, ${column.data_type}, ${column.is_required}, ${column.default_value}, ${column.sort_order}, ${column.width})
-      RETURNING *
-    `
-    return result[0] as TableColumn
+      VALUES (${column.table_id}, ${column.column_name}, ${column.display_name}, ${column.data_type}, 
+              ${column.is_required}, ${column.default_value}, ${column.sort_order}, ${column.width})
+    `;
+
+    const [result] = await sql<TableColumn[]>`
+      SELECT * FROM table_columns WHERE id = LAST_INSERT_ID()
+    `;
+
+    if (!result) {
+      throw new Error('Failed to create table column');
+    }
+
+    return result;
   }
 
   static async updateTableColumn(id: number, updates: Partial<TableColumn>): Promise<TableColumn> {
-    const result = await sql`
+    await sql`
       UPDATE table_columns 
       SET column_name = COALESCE(${updates.column_name}, column_name),
           display_name = COALESCE(${updates.display_name}, display_name),
@@ -268,50 +433,71 @@ export class DatabaseService {
           is_required = COALESCE(${updates.is_required}, is_required),
           default_value = COALESCE(${updates.default_value}, default_value),
           sort_order = COALESCE(${updates.sort_order}, sort_order),
-          width = COALESCE(${updates.width}, width),
-          updated_at = NOW()
+          width = COALESCE(${updates.width}, width)
       WHERE id = ${id}
-      RETURNING *
-    `
-    return result[0] as TableColumn
+    `;
+
+    const [result] = await sql<TableColumn[]>`
+      SELECT * FROM table_columns WHERE id = ${id}
+    `;
+
+    if (!result) {
+      throw new Error('Failed to update table column');
+    }
+
+    return result;
   }
 
   static async deleteTableColumn(id: number): Promise<void> {
-    await sql`DELETE FROM table_columns WHERE id = ${id}`
+    await sql`DELETE FROM table_columns WHERE id = ${id}`;
   }
 
   // Data operations
   static async getTableData(tableId: number, limit = 100, offset = 0): Promise<TableData[]> {
-    const result = await sql`
+    return await sql<TableData[]>`
       SELECT * FROM table_data 
       WHERE table_id = ${tableId}
       ORDER BY id
       LIMIT ${limit} OFFSET ${offset}
-    `
-    return result as TableData[]
+    `;
   }
 
   static async createTableRow(tableId: number, rowData: Record<string, any>): Promise<TableData> {
-    const result = await sql`
+    await sql`
       INSERT INTO table_data (table_id, row_data)
       VALUES (${tableId}, ${JSON.stringify(rowData)})
-      RETURNING *
-    `
-    return result[0] as TableData
+    `;
+
+    const [result] = await sql<TableData[]>`
+      SELECT * FROM table_data WHERE id = LAST_INSERT_ID()
+    `;
+
+    if (!result) {
+      throw new Error('Failed to create table row');
+    }
+
+    return result;
   }
 
   static async updateTableRow(id: number, rowData: Record<string, any>): Promise<TableData> {
-    const result = await sql`
+    await sql`
       UPDATE table_data 
-      SET row_data = ${JSON.stringify(rowData)},
-          updated_at = NOW()
+      SET row_data = ${JSON.stringify(rowData)}
       WHERE id = ${id}
-      RETURNING *
-    `
-    return result[0] as TableData
+    `;
+
+    const [result] = await sql<TableData[]>`
+      SELECT * FROM table_data WHERE id = ${id}
+    `;
+
+    if (!result) {
+      throw new Error('Failed to update table row');
+    }
+
+    return result;
   }
 
   static async deleteTableRow(id: number): Promise<void> {
-    await sql`DELETE FROM table_data WHERE id = ${id}`
+    await sql`DELETE FROM table_data WHERE id = ${id}`;
   }
 }

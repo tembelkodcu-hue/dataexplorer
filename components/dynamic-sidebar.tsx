@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { ChevronRight, ChevronDown, Folder, Table, Plus, Edit, Trash2, FolderPlus } from "lucide-react"
+import { ChevronRight, ChevronDown, Folder, Table, Plus, Edit, Trash2, FolderPlus, AlertTriangle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -9,6 +9,17 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } 
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Sidebar, SidebarContent, SidebarHeader } from "@/components/ui/sidebar"
+import { toast } from "@/hooks/use-toast"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { cn } from "@/lib/utils"
 
 interface SidebarItem {
@@ -31,10 +42,12 @@ export function DynamicSidebar({ selectedItem, onItemSelect }: DynamicSidebarPro
   const [expandedItems, setExpandedItems] = useState<Set<number>>(new Set([]))
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false)
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
   const [contextItem, setContextItem] = useState<SidebarItem | null>(null)
   const [newItemName, setNewItemName] = useState("")
   const [newItemType, setNewItemType] = useState<"folder" | "table">("folder")
   const [newItemParent, setNewItemParent] = useState<number | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
 
   useEffect(() => {
     loadSidebarItems()
@@ -103,66 +116,192 @@ export function DynamicSidebar({ selectedItem, onItemSelect }: DynamicSidebarPro
 
   const handleCreateItem = async () => {
     try {
+      setIsLoading(true);
+
+      // Validate name
+      if (!newItemName.trim()) {
+        toast({
+          title: "Error",
+          description: "Name is required",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Format the name for the database
+      const formattedName = newItemName.trim();
+      const dbName = formattedName
+        .toLowerCase()
+        .replace(/\s+/g, "_")
+        .replace(/[^a-z0-9_]/g, "");
+
       const response = await fetch("/api/sidebar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: newItemName,
+          name: formattedName,
           parent_id: newItemParent,
           item_type: newItemType,
           icon: newItemType === "folder" ? "folder" : "table",
+          table_name: dbName, // Add database-friendly name
         }),
-      })
+      });
 
-      if (response.ok) {
-        await loadSidebarItems()
-        setIsCreateDialogOpen(false)
-        setNewItemName("")
-        setNewItemParent(null)
-        setNewItemType("folder")
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || "Failed to create item");
       }
+
+      await loadSidebarItems();
+      setIsCreateDialogOpen(false);
+      setNewItemName("");
+      setNewItemParent(null);
+      setNewItemType("folder");
+
+      // If parent folder exists, expand it
+      if (newItemParent) {
+        setExpandedItems((prev) => new Set([...prev, newItemParent]));
+      }
+
+      toast({
+        title: "Success",
+        description: `${newItemType === "folder" ? "Folder" : "Table"} created successfully`,
+      });
     } catch (error) {
-      console.error("Failed to create item:", error)
+      console.error("Failed to create item:", error);
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to create item",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
     }
   }
 
   const handleEditItem = async () => {
-    if (!contextItem) return
+    if (!contextItem) {
+      console.error("No context item found");
+      return;
+    }
 
     try {
+      setIsLoading(true);
+      console.log('Attempting to edit item:', contextItem);
+
+      // Validate name
+      const trimmedName = newItemName.trim();
+      if (!trimmedName) {
+        console.log('Empty name provided');
+        toast({
+          title: "Error",
+          description: "Name is required",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Don't update if name hasn't changed
+      if (trimmedName === contextItem.name) {
+        console.log('Name unchanged, closing dialog');
+        setIsEditDialogOpen(false);
+        setNewItemName("");
+        setContextItem(null);
+        return;
+      }
+
+      console.log('Sending update request for:', { id: contextItem.id, name: trimmedName });
+      
       const response = await fetch(`/api/sidebar/${contextItem.id}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "Cache-Control": "no-cache"
+        },
         body: JSON.stringify({
-          name: newItemName,
+          name: trimmedName,
         }),
-      })
+      });
 
-      if (response.ok) {
-        await loadSidebarItems()
-        setIsEditDialogOpen(false)
-        setNewItemName("")
-        setContextItem(null)
+      console.log('Update response status:', response.status);
+      const data = await response.json();
+      console.log('Update response data:', data);
+
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to update item");
       }
+
+      await loadSidebarItems();
+      setIsEditDialogOpen(false);
+      setNewItemName("");
+      setContextItem(null);
+
+      toast({
+        title: "Success",
+        description: `${contextItem.item_type === "folder" ? "Folder" : "Table"} renamed successfully`,
+      });
     } catch (error) {
-      console.error("Failed to edit item:", error)
+      console.error("Failed to edit item:", error);
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to update item",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
     }
   }
 
   const handleDeleteItem = async (item: SidebarItem) => {
     try {
+      setIsLoading(true);
+      console.log('Attempting to delete item:', item);
+      
+      if (item.children && item.children.length > 0) {
+        toast({
+          title: "Cannot Delete",
+          description: "Please delete or move all items inside this folder first",
+          variant: "destructive",
+        });
+        return;
+      }
+
       const response = await fetch(`/api/sidebar/${item.id}`, {
         method: "DELETE",
-      })
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
 
-      if (response.ok) {
-        await loadSidebarItems()
-        if (selectedItem?.id === item.id) {
-          onItemSelect({ id: 0, name: "", type: "folder" })
-        }
+      console.log('Delete response status:', response.status);
+      const data = await response.json();
+      console.log('Delete response data:', data);
+
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to delete item");
       }
+
+      await loadSidebarItems();
+      if (selectedItem?.id === item.id) {
+        onItemSelect({ id: 0, name: "", type: "folder" });
+      }
+
+      toast({
+        title: "Success",
+        description: `${item.item_type === "folder" ? "Folder" : "Table"} deleted successfully`,
+      });
+
+      setIsDeleteDialogOpen(false);
+      setContextItem(null);
     } catch (error) {
-      console.error("Failed to delete item:", error)
+      console.error("Failed to delete item:", error);
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to delete item",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
     }
   }
 
@@ -249,7 +388,13 @@ export function DynamicSidebar({ selectedItem, onItemSelect }: DynamicSidebarPro
               <Edit className="h-4 w-4 mr-2" />
               Rename
             </ContextMenuItem>
-            <ContextMenuItem onClick={() => handleDeleteItem(item)} className="text-destructive">
+            <ContextMenuItem 
+              onClick={() => {
+                setContextItem(item);
+                setIsDeleteDialogOpen(true);
+              }} 
+              className="text-destructive"
+            >
               <Trash2 className="h-4 w-4 mr-2" />
               Delete
             </ContextMenuItem>
@@ -314,11 +459,11 @@ export function DynamicSidebar({ selectedItem, onItemSelect }: DynamicSidebarPro
               </Select>
             </div>
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setIsCreateDialogOpen(false)}>
+              <Button variant="outline" onClick={() => setIsCreateDialogOpen(false)} disabled={isLoading}>
                 Cancel
               </Button>
-              <Button onClick={handleCreateItem} disabled={!newItemName.trim()}>
-                Create
+              <Button onClick={handleCreateItem} disabled={!newItemName.trim() || isLoading}>
+                {isLoading ? "Creating..." : "Create"}
               </Button>
             </div>
           </div>
@@ -342,16 +487,48 @@ export function DynamicSidebar({ selectedItem, onItemSelect }: DynamicSidebarPro
               />
             </div>
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setIsEditDialogOpen(false)}>
+              <Button variant="outline" onClick={() => setIsEditDialogOpen(false)} disabled={isLoading}>
                 Cancel
               </Button>
-              <Button onClick={handleEditItem} disabled={!newItemName.trim()}>
-                Save
+              <Button onClick={handleEditItem} disabled={!newItemName.trim() || isLoading}>
+                {isLoading ? "Saving..." : "Save"}
               </Button>
             </div>
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Are you sure?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {contextItem?.item_type === "folder" ? (
+                <>
+                  <AlertTriangle className="w-4 h-4 text-yellow-500 inline-block mr-1" />
+                  This will delete the folder &quot;{contextItem?.name}&quot; and all its contents.
+                </>
+              ) : (
+                <>
+                  <AlertTriangle className="w-4 h-4 text-yellow-500 inline-block mr-1" />
+                  This will permanently delete the table &quot;{contextItem?.name}&quot; and all its data.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isLoading}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={isLoading}
+              onClick={() => contextItem && handleDeleteItem(contextItem)}
+            >
+              {isLoading ? "Deleting..." : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }

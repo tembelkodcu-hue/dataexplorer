@@ -10,6 +10,8 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } 
 import { toast } from "@/hooks/use-toast"
 import { Plus, Settings, Trash2 } from "lucide-react"
 
+import { ColumnDefinition } from 'tabulator-tables'
+
 interface TableViewProps {
   itemId: number
   itemName: string
@@ -27,6 +29,12 @@ interface Column {
 interface TableData {
   id: number
   data: Record<string, any>
+}
+
+// Extended Tabulator column definition
+interface TabulatorColumnDefinition extends ColumnDefinition {
+  headerContextMenu?: { label: string; action: () => void }[]
+  cellEdited?: (cell: any) => void
 }
 
 export function TableView({ itemId, itemName }: TableViewProps) {
@@ -48,15 +56,20 @@ export function TableView({ itemId, itemName }: TableViewProps) {
   useEffect(() => {
     const loadTabulator = async () => {
       if (typeof window !== "undefined") {
-        // Load Tabulator CSS
-        const link = document.createElement("link")
-        link.rel = "stylesheet"
-        link.href = "https://unpkg.com/tabulator-tables@6.2.1/dist/css/tabulator.min.css"
-        document.head.appendChild(link)
+        try {
+          // Load Tabulator CSS
+          const link = document.createElement("link")
+          link.rel = "stylesheet"
+          link.href = "https://unpkg.com/tabulator-tables@6.2.1/dist/css/tabulator.min.css"
+          document.head.appendChild(link)
 
-        // Load Tabulator JS
-        const { TabulatorFull } = await import("tabulator-tables")
-        window.Tabulator = TabulatorFull
+          // Load Tabulator JS
+          const { TabulatorFull } = await import("tabulator-tables")
+          // Type assertion for Tabulator
+          window.Tabulator = TabulatorFull as typeof window.Tabulator
+        } catch (error) {
+          console.error("Error loading Tabulator:", error)
+        }
       }
     }
     loadTabulator()
@@ -104,7 +117,13 @@ export function TableView({ itemId, itemName }: TableViewProps) {
   }
 
   const initializeTabulator = () => {
-    if (!window.Tabulator || !tableRef.current) return
+    if (!window.Tabulator || !tableRef.current) {
+      console.warn('Tabulator or table ref not available yet');
+      return;
+    }
+
+    console.log('Initializing Tabulator with columns:', columns);
+    console.log('Table data:', tableData);
 
     // Destroy existing table
     if (tabulatorRef.current) {
@@ -112,11 +131,13 @@ export function TableView({ itemId, itemName }: TableViewProps) {
     }
 
     // Added right-click context menu to column headers and fixed field mapping
-    const tabulatorColumns = columns.map((col) => ({
+    const tabulatorColumns: TabulatorColumnDefinition[] = columns.map((col) => ({
       title: col.name,
-      field: col.name.toLowerCase().replace(/\s+/g, "_"), // Ensure field names are valid
-      editor: getEditorForType(col.data_type),
+      field: `data.${col.name}`, // Access data from the nested data object
+      editor: true,
+      editorParams: { type: getEditorForType(col.data_type) },
       formatter: getFormatterForType(col.data_type),
+      sorter: col.data_type === "number" ? "number" : "string",
       headerSort: true,
       headerContextMenu: [
         {
@@ -130,9 +151,11 @@ export function TableView({ itemId, itemName }: TableViewProps) {
       ],
       cellEdited: (cell: any) => {
         const rowData = cell.getRow().getData()
-        updateRowData(rowData.id, rowData)
+        updateRowData(rowData.id, rowData.data) // Pass the nested data object
       },
-    }))
+      resizable: true,
+      minWidth: 100
+    } as TabulatorColumnDefinition))
 
     // Add action column
     tabulatorColumns.push({
@@ -148,32 +171,26 @@ export function TableView({ itemId, itemName }: TableViewProps) {
       },
     })
 
-    // Fixed data mapping to match field names
-    const mappedData = tableData.map((row) => {
-      const mappedRow: any = { id: row.id }
-      columns.forEach((col) => {
-        const fieldName = col.name.toLowerCase().replace(/\s+/g, "_")
-        mappedRow[fieldName] = row.data[col.name] || getDefaultValueForType(col.data_type, col.default_value)
-      })
-      return mappedRow
-    })
+    // Use the data directly from the row, maintaining the nested structure
+    const data = tableData.map((row) => ({
+      id: row.id,
+      data: row.data || {} // Ensure we have a data object
+    }))
 
     // Initialize Tabulator
-    tabulatorRef.current = new window.Tabulator(tableRef.current, {
-      data: mappedData,
-      columns: tabulatorColumns,
-      layout: "fitColumns",
-      pagination: "local",
-      paginationSize: 50,
-      movableColumns: true,
-      resizableRows: true,
-      addRowPos: "top",
-      history: true,
-      keybindings: {
-        navEnter: "editNextCell", // Enter key moves to next cell and saves
-      },
-      editTriggerEvent: "click",
-    })
+    try {
+      console.log('Creating Tabulator with:', { data, columns: tabulatorColumns });
+      tabulatorRef.current = new window.Tabulator(tableRef.current, {
+        data: data,
+        columns: tabulatorColumns as any[],
+        layout: "fitColumns",
+        movableColumns: true,
+        height: "100%",
+        history: true
+      });
+    } catch (error) {
+      console.error('Error initializing Tabulator:', error);
+    }
   }
 
   const getEditorForType = (dataType: string) => {
@@ -346,34 +363,58 @@ export function TableView({ itemId, itemName }: TableViewProps) {
 
   const handleCreateColumn = async () => {
     try {
+      // Validate column name
+      if (!newColumn.name.trim()) {
+        toast({
+          title: "Error",
+          description: "Column name is required",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Clean column name
+      const columnName = newColumn.name
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, '_')
+        .replace(/[^a-z0-9_]/g, '');
+
       const response = await fetch(`/api/tables/${itemId}/columns`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...newColumn,
+          name: columnName,
+          display_name: newColumn.name.trim(),
+          data_type: newColumn.data_type,
+          is_required: newColumn.is_required,
+          default_value: newColumn.default_value?.trim() || null,
           sort_order: columns.length,
         }),
-      })
+      });
 
       if (!response.ok) {
-        throw new Error("Failed to create column")
+        const data = await response.json();
+        throw new Error(data.error || "Failed to create column");
       }
 
-      setNewColumn({ name: "", data_type: "text", is_required: false, default_value: "" })
-      setShowColumnDialog(false)
-      loadTableData() // Reload to refresh Tabulator
+      setNewColumn({ name: "", data_type: "text", is_required: false, default_value: "" });
+      setShowColumnDialog(false);
+      
+      // Reload table data
+      await loadTableData();
 
       toast({
         title: "Success",
         description: "Column created successfully",
-      })
+      });
     } catch (error) {
-      console.error("Error creating column:", error)
+      console.error("Error creating column:", error);
       toast({
         title: "Error",
-        description: "Failed to create column",
+        description: error instanceof Error ? error.message : "Failed to create column",
         variant: "destructive",
-      })
+      });
     }
   }
 
