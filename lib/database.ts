@@ -68,7 +68,7 @@ export class DatabaseService {
       await sql`
         CREATE TABLE IF NOT EXISTS dynamic_tables (
           id INT AUTO_INCREMENT PRIMARY KEY,
-          sidebar_item_id INT NOT NULL,
+          sidebar_item_id INT NOT NULL UNIQUE,
           table_name VARCHAR(255) NOT NULL,
           display_name VARCHAR(255) NOT NULL,
           description TEXT,
@@ -293,69 +293,53 @@ export class DatabaseService {
     try {
       console.log('Attempting to delete item:', id);
       
-      // First check if the item exists
-      const rows = await sql<SidebarItem[]>(
+      // First check if the item exists and get its type
+      const [item] = await sql<SidebarItem[]>(
         'SELECT * FROM sidebar_items WHERE id = ?',
         [id]
       );
 
-      console.log('Query result:', rows);
-
-      const item = rows?.[0];
       if (!item) {
         throw new Error("Sidebar item not found");
       }
 
-      console.log('Found item to delete:', item);
+      // If it's a folder, delete its contents first
+      if (item.item_type === 'folder') {
+        // Get all tables under this folder
+        const tablesToDelete = await sql<{ id: number }[]>(
+          'SELECT id FROM sidebar_items WHERE parent_id = ? AND item_type = ?',
+          [id, 'table']
+        );
 
-      // Check for children
-      const [childrenResult] = await sql<[{ count: number }][]>(
-        'SELECT COUNT(*) as count FROM sidebar_items WHERE parent_id = ?',
-        [id]
-      );
+        if (tablesToDelete.length > 0) {
+          const tableIds = tablesToDelete.map(t => t.id);
+          // Delete associated dynamic tables
+          await sql(
+            'DELETE FROM dynamic_tables WHERE sidebar_item_id IN (' + tableIds.map(() => '?').join(',') + ')',
+            tableIds
+          );
+        }
 
-      if (childrenResult?.[0]?.count > 0) {
-        throw new Error("Cannot delete item with children. Please delete child items first.");
-      }
-
-                  // For tables, check data
-      if (item.item_type === 'table') {
-        const tables = await sql<DynamicTable[]>(
-          'SELECT * FROM dynamic_tables WHERE sidebar_item_id = ?',
+        // The foreign key cascade will handle the rest
+        await sql(
+          'DELETE FROM sidebar_items WHERE parent_id = ?',
           [id]
         );
-        
-        if (tables?.[0]) {
-          const tableId = tables[0].id;
-          const dataCount = await sql<{ count: number }[]>(
-            'SELECT COUNT(*) as count FROM table_data WHERE table_id = ?',
-            [tableId]
-          );
-          console.log(`Table has ${dataCount?.[0]?.count ?? 0} rows of data`);
-        }
+      } else if (item.item_type === 'table') {
+        // For tables, just delete the dynamic table (cascade will handle the rest)
+        await sql(
+          'DELETE FROM dynamic_tables WHERE sidebar_item_id = ?',
+          [id]
+        );
       }
 
-      // Check for children
-      const children = await sql<{ count: number }[]>(
-        'SELECT COUNT(*) as count FROM sidebar_items WHERE parent_id = ?',
-        [id]
-      );
-      const childCount = children?.[0]?.count ?? 0;
-      console.log('Child count:', childCount);
-
-      if (childCount > 0) {
-        throw new Error("Cannot delete item with children. Please delete child items first.");
-      }
-
-      // Delete the sidebar item (CASCADE will handle related records)
-      console.log('Deleting item:', id);
-      const result = await sql(
+      // Finally delete the item itself
+      await sql(
         'DELETE FROM sidebar_items WHERE id = ?',
         [id]
       );
-      console.log('Delete result:', result);
-      console.log('Item deleted successfully');
 
+      console.log('Item deleted successfully:', item);
     } catch (error) {
       console.error("Error in deleteSidebarItem:", error);
       throw error;
@@ -425,17 +409,70 @@ export class DatabaseService {
   }
 
   static async updateTableColumn(id: number, updates: Partial<TableColumn>): Promise<TableColumn> {
-    await sql`
-      UPDATE table_columns 
-      SET column_name = COALESCE(${updates.column_name}, column_name),
-          display_name = COALESCE(${updates.display_name}, display_name),
-          data_type = COALESCE(${updates.data_type}, data_type),
-          is_required = COALESCE(${updates.is_required}, is_required),
-          default_value = COALESCE(${updates.default_value}, default_value),
-          sort_order = COALESCE(${updates.sort_order}, sort_order),
-          width = COALESCE(${updates.width}, width)
-      WHERE id = ${id}
-    `;
+    try {
+      console.log('Updating column:', { id, updates });
+
+      // Build update query dynamically
+      const updateFields = [];
+      const values = [];
+      
+      if (updates.column_name !== undefined) {
+        updateFields.push('column_name = ?');
+        values.push(updates.column_name);
+      }
+      if (updates.display_name !== undefined) {
+        updateFields.push('display_name = ?');
+        values.push(updates.display_name);
+      }
+      if (updates.data_type !== undefined) {
+        updateFields.push('data_type = ?');
+        values.push(updates.data_type);
+      }
+      if (updates.is_required !== undefined) {
+        updateFields.push('is_required = ?');
+        values.push(updates.is_required);
+      }
+      if (updates.default_value !== undefined) {
+        updateFields.push('default_value = ?');
+        values.push(updates.default_value);
+      }
+      if (updates.sort_order !== undefined) {
+        updateFields.push('sort_order = ?');
+        values.push(updates.sort_order);
+      }
+      if (updates.width !== undefined) {
+        updateFields.push('width = ?');
+        values.push(updates.width);
+      }
+
+      if (updateFields.length === 0) {
+        throw new Error('No fields to update');
+      }
+
+      // Add id to values
+      values.push(id);
+
+      // Execute update
+      await sql(
+        `UPDATE table_columns SET ${updateFields.join(', ')} WHERE id = ?`,
+        values
+      );
+
+      // Get updated column
+      const [result] = await sql<TableColumn[]>`
+        SELECT * FROM table_columns WHERE id = ${id}
+      `;
+
+      if (!result) {
+        throw new Error('Column not found after update');
+      }
+
+      console.log('Column updated successfully:', result);
+      return result;
+    } catch (error) {
+      console.error('Error updating column:', error);
+      throw error;
+    }
 
     const [result] = await sql<TableColumn[]>`
       SELECT * FROM table_columns WHERE id = ${id}
@@ -463,20 +500,39 @@ export class DatabaseService {
   }
 
   static async createTableRow(tableId: number, rowData: Record<string, any>): Promise<TableData> {
-    await sql`
-      INSERT INTO table_data (table_id, row_data)
-      VALUES (${tableId}, ${JSON.stringify(rowData)})
-    `;
+    try {
+      console.log('Creating table row:', { tableId, rowData });
 
-    const [result] = await sql<TableData[]>`
-      SELECT * FROM table_data WHERE id = LAST_INSERT_ID()
-    `;
+      // Validate table exists
+      const [table] = await sql<[{ count: number }]>`
+        SELECT COUNT(*) as count FROM dynamic_tables WHERE id = ${tableId}
+      `;
 
-    if (!result) {
-      throw new Error('Failed to create table row');
+      if (!table || table.count === 0) {
+        throw new Error(`Table with ID ${tableId} not found`);
+      }
+
+      // Insert the row
+      await sql`
+        INSERT INTO table_data (table_id, row_data)
+        VALUES (${tableId}, ${JSON.stringify(rowData)})
+      `;
+
+      // Get the created row
+      const [result] = await sql<TableData[]>`
+        SELECT * FROM table_data WHERE id = LAST_INSERT_ID()
+      `;
+
+      if (!result) {
+        throw new Error('Failed to create table row');
+      }
+
+      console.log('Created row:', result);
+      return result;
+    } catch (error) {
+      console.error('Error in createTableRow:', error);
+      throw error;
     }
-
-    return result;
   }
 
   static async updateTableRow(id: number, rowData: Record<string, any>): Promise<TableData> {

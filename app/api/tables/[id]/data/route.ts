@@ -14,13 +14,27 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
 
 export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const tableId = Number.parseInt(params.id)
-    const body = await request.json()
+    const sidebarItemId = Number.parseInt(params.id);
+    const body = await request.json();
 
-    const row = await DatabaseService.createTableRow(tableId, body.data)
-    return NextResponse.json(row)
+    // Get the dynamic table ID first
+    const dynamicTable = await DatabaseService.getDynamicTableBySidebarId(sidebarItemId);
+    
+    if (!dynamicTable) {
+      return NextResponse.json({ error: "Table not found" }, { status: 404 });
+    }
+
+    console.log('Creating row in table:', dynamicTable.id, 'with data:', body.data);
+
+    const row = await DatabaseService.createTableRow(dynamicTable.id, body.data);
+    
+    console.log('Created row:', row);
+    
+    return NextResponse.json(row);
   } catch (error) {
-    console.error("Error creating row:", error)
-    return NextResponse.json({ error: "Failed to create row" }, { status: 500 })
+    console.error("Error creating row:", error);
+    return NextResponse.json({ 
+      error: error instanceof Error ? error.message : "Failed to create row"
+    }, { status: 500 });
   }
 }

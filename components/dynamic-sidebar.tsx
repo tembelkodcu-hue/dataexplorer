@@ -49,13 +49,14 @@ export function DynamicSidebar({ selectedItem, onItemSelect }: DynamicSidebarPro
   const [newItemParent, setNewItemParent] = useState<number | null>(null)
   const [isLoading, setIsLoading] = useState(false)
 
-  useEffect(() => {
-    loadSidebarItems()
-  }, [])
-
   const loadSidebarItems = async () => {
     try {
-      const response = await fetch("/api/sidebar")
+      const response = await fetch("/api/sidebar", {
+        headers: {
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
+        }
+      });
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
@@ -74,6 +75,17 @@ export function DynamicSidebar({ selectedItem, onItemSelect }: DynamicSidebarPro
       setItems([])
     }
   }
+
+  // Load items initially and set up polling
+  useEffect(() => {
+    loadSidebarItems();
+    
+    // Set up polling to refresh the sidebar every 2 seconds
+    const intervalId = setInterval(loadSidebarItems, 2000);
+    
+    // Cleanup on unmount
+    return () => clearInterval(intervalId);
+  }, [])
 
   const buildTree = (flatItems: SidebarItem[]): SidebarItem[] => {
     if (!Array.isArray(flatItems) || flatItems.length === 0) {
@@ -256,20 +268,13 @@ export function DynamicSidebar({ selectedItem, onItemSelect }: DynamicSidebarPro
     try {
       setIsLoading(true);
       console.log('Attempting to delete item:', item);
-      
-      if (item.children && item.children.length > 0) {
-        toast({
-          title: "Cannot Delete",
-          description: "Please delete or move all items inside this folder first",
-          variant: "destructive",
-        });
-        return;
-      }
 
+      // Server-side check and delete
       const response = await fetch(`/api/sidebar/${item.id}`, {
         method: "DELETE",
         headers: {
           "Content-Type": "application/json",
+          "Cache-Control": "no-cache"
         },
       });
 
@@ -281,18 +286,33 @@ export function DynamicSidebar({ selectedItem, onItemSelect }: DynamicSidebarPro
         throw new Error(data.error || "Failed to delete item");
       }
 
-      await loadSidebarItems();
+      // Clear expanded state for deleted folder and its parent
+      setExpandedItems(prev => {
+        const newExpanded = new Set(prev);
+        newExpanded.delete(item.id);
+        if (item.parent_id) {
+          newExpanded.delete(item.parent_id);
+        }
+        return newExpanded;
+      });
+
+      // Update selected item if current one is deleted
       if (selectedItem?.id === item.id) {
         onItemSelect({ id: 0, name: "", type: "folder" });
       }
 
+      // Close the dialog
+      setIsDeleteDialogOpen(false);
+      setContextItem(null);
+
+      // Show success message
       toast({
         title: "Success",
         description: `${item.item_type === "folder" ? "Folder" : "Table"} deleted successfully`,
       });
 
-      setIsDeleteDialogOpen(false);
-      setContextItem(null);
+      // Force an immediate refresh
+      await loadSidebarItems();
     } catch (error) {
       console.error("Failed to delete item:", error);
       toast({

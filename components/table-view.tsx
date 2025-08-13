@@ -19,11 +19,13 @@ interface TableViewProps {
 
 interface Column {
   id: number
-  name: string
+  column_name: string
+  display_name: string
   data_type: string
   is_required: boolean
   default_value?: string
   sort_order: number
+  width: number
 }
 
 interface TableData {
@@ -132,8 +134,8 @@ export function TableView({ itemId, itemName }: TableViewProps) {
 
     // Added right-click context menu to column headers and fixed field mapping
     const tabulatorColumns: TabulatorColumnDefinition[] = columns.map((col) => ({
-      title: col.name,
-      field: `data.${col.name}`, // Access data from the nested data object
+      title: col.display_name || col.column_name, // Use display_name if available, fallback to column_name
+      field: `data.${(col.column_name || '').toLowerCase().replace(/\s+/g, '_')}`, // Access data from the nested data object with normalized field name
       editor: true,
       editorParams: { type: getEditorForType(col.data_type) },
       formatter: getFormatterForType(col.data_type),
@@ -149,9 +151,52 @@ export function TableView({ itemId, itemName }: TableViewProps) {
           action: () => handleDeleteColumn(col.id),
         },
       ],
-      cellEdited: (cell: any) => {
-        const rowData = cell.getRow().getData()
-        updateRowData(rowData.id, rowData.data) // Pass the nested data object
+      cellEdited: async (cell: any) => {
+        try {
+          const row = cell.getRow();
+          const rowData = row.getData();
+          const field = cell.getField();
+          const value = cell.getValue();
+          
+          console.log('Cell edited:', {
+            field,
+            value,
+            rowData
+          });
+
+          // Get the original column name from the field path
+          const fieldName = field.replace('data.', '');
+          
+          // Find the matching column to get the correct column name
+          const column = columns.find(col => 
+            col.column_name.toLowerCase().replace(/\s+/g, '_') === fieldName
+          );
+
+          if (!column) {
+            console.error('Could not find matching column for field:', fieldName);
+            throw new Error('Invalid column');
+          }
+
+          // Get the current row data and update just the changed field
+          const currentData = rowData.data || {};
+          const updateData = {
+            ...currentData,
+            [column.column_name]: value
+          };
+
+          console.log('Sending update with data:', updateData);
+          
+          await updateRowData(rowData.id, { data: updateData });
+        } catch (error) {
+          console.error('Error handling cell edit:', error);
+          // Revert the cell to its previous value on error
+          cell.restoreOldValue();
+          toast({
+            title: "Error",
+            description: error instanceof Error ? error.message : "Failed to update cell",
+            variant: "destructive",
+          });
+        }
       },
       resizable: true,
       minWidth: 100
@@ -159,16 +204,29 @@ export function TableView({ itemId, itemName }: TableViewProps) {
 
     // Add action column
     tabulatorColumns.push({
-      title: "Actions",
+      title: "",
       field: "actions",
-      width: 100,
+      width: 50,
+      headerSort: false,
       formatter: () =>
-        '<button class="delete-row-btn text-red-500 hover:text-red-700 px-2 py-1 rounded">Delete</button>',
+        `<button class="delete-row-btn text-red-500 hover:text-red-700 p-1 rounded">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" 
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 6h18"></path>
+            <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
+            <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+          </svg>
+        </button>`,
       cellClick: (e: any, cell: any) => {
-        if (e.target.classList.contains("delete-row-btn")) {
-          deleteRow(cell.getRow().getData().id)
+        const deleteBtn = e.target.closest(".delete-row-btn");
+        if (deleteBtn) {
+          if (confirm('Are you sure you want to delete this row?')) {
+            deleteRow(cell.getRow().getData().id);
+          }
         }
       },
+      headerHozAlign: "center",
+      hozAlign: "center",
     })
 
     // Use the data directly from the row, maintaining the nested structure
@@ -227,37 +285,54 @@ export function TableView({ itemId, itemName }: TableViewProps) {
 
   const updateRowData = async (rowId: number, data: any) => {
     try {
-      const originalData: any = {}
+      console.log('Updating row data:', { rowId, data });
+      
+      // Normalize incoming data
+      const rowData = data.data || data; // Handle both nested and direct data
+      const originalData: any = {};
+      
       columns.forEach((col) => {
-        const fieldName = col.name.toLowerCase().replace(/\s+/g, "_")
-        if (data[fieldName] !== undefined) {
-          originalData[col.name] = data[fieldName]
+        const fieldName = col.column_name.toLowerCase().replace(/\s+/g, "_");
+        const value = rowData[fieldName];
+        
+        // Only include defined values, including explicit null/false values
+        if (value !== undefined) {
+          originalData[col.column_name] = value;
         }
-      })
+      });
+
+      console.log('Processed data to send:', originalData);
 
       const response = await fetch(`/api/tables/${itemId}/data/${rowId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ data: originalData }),
-      })
+      });
 
+      const result = await response.json();
+      
       if (!response.ok) {
-        throw new Error("Failed to update row")
+        console.error('Update failed:', result);
+        throw new Error(result.error || "Failed to update row");
       }
+
+      console.log('Update successful:', result);
 
       toast({
         title: "Success",
         description: "Row updated successfully",
-      })
+      });
+      
+      return result;
     } catch (error) {
-      console.error("Error updating row:", error)
+      console.error("Error updating row:", error);
       toast({
         title: "Error",
-        description: "Failed to update row",
+        description: error instanceof Error ? error.message : "Failed to update row",
         variant: "destructive",
-      })
+      });
       // Revert the change in Tabulator
-      loadTableData()
+      loadTableData();
     }
   }
 
@@ -289,57 +364,67 @@ export function TableView({ itemId, itemName }: TableViewProps) {
     }
   }
 
-  const addNewRow = () => {
+  const addNewRow = async () => {
     if (!tabulatorRef.current) return
 
-    const defaultData: any = { id: Date.now() }
-    columns.forEach((col) => {
-      const fieldName = col.name.toLowerCase().replace(/\s+/g, "_")
-      defaultData[fieldName] = getDefaultValueForType(col.data_type, col.default_value)
-    })
-
-    tabulatorRef.current.addRow(defaultData, true)
-
-    // Map field names back to original column names for database
-    const originalData: any = {}
-    columns.forEach((col) => {
-      const fieldName = col.name.toLowerCase().replace(/\s+/g, "_")
-      originalData[col.name] = defaultData[fieldName]
-    })
-
-    // Save to database
-    createNewRow(originalData)
-  }
-
-  const createNewRow = async (data: any) => {
     try {
+      // First get the dynamic table ID
+      const tableResponse = await fetch(`/api/tables/${itemId}`);
+      const tableData = await tableResponse.json();
+      
+      if (!tableData || tableData.error === "Table not found") {
+        throw new Error("Table not found. Please create columns first.");
+      }
+
+      console.log('Found table:', tableData);
+
+      // Prepare default data
+      const rowData: any = {}
+      columns.forEach((col) => {
+        const fieldName = col.column_name;
+        rowData[fieldName] = getDefaultValueForType(col.data_type, col.default_value)
+      })
+
+      console.log('Creating new row with data:', rowData);
+
+      // Save to database with the correct table ID
       const response = await fetch(`/api/tables/${itemId}/data`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data }),
-      })
+        body: JSON.stringify({
+          table_id: tableData.id,
+          data: rowData
+        }),
+      });
 
       if (!response.ok) {
-        throw new Error("Failed to create row")
+        const error = await response.json();
+        console.error('Failed to create row:', error);
+        throw new Error(error.error || "Failed to create row");
       }
 
-      const newRow = await response.json()
+      const newRow = await response.json();
+      console.log('Row created successfully:', newRow);
 
-      // Update the row ID in Tabulator
-      const row = tabulatorRef.current.getRow(data.id)
-      row.update({ ...data, id: newRow.id })
+      // Then add to Tabulator with the correct structure
+      const tabulatorData = {
+        id: newRow.id,
+        data: rowData
+      };
+
+      tabulatorRef.current.addRow(tabulatorData, true);
 
       toast({
         title: "Success",
         description: "Row created successfully",
-      })
+      });
     } catch (error) {
-      console.error("Error creating row:", error)
+      console.error("Error creating row:", error);
       toast({
         title: "Error",
-        description: "Failed to create row",
+        description: error instanceof Error ? error.message : "Failed to create row",
         variant: "destructive",
-      })
+      });
     }
   }
 
@@ -380,6 +465,30 @@ export function TableView({ itemId, itemName }: TableViewProps) {
         .replace(/\s+/g, '_')
         .replace(/[^a-z0-9_]/g, '');
 
+      // First check if we need to create a dynamic table
+      const tableResponse = await fetch(`/api/tables/${itemId}`);
+      const tableData = await tableResponse.json();
+
+      if (!tableData || tableData.error === "Table not found") {
+        // Create dynamic table first
+        const createTableResponse = await fetch(`/api/tables/create`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sidebar_item_id: itemId,
+            table_name: itemName.toLowerCase().replace(/\s+/g, '_'),
+            display_name: itemName,
+            description: `Table for ${itemName}`
+          }),
+        });
+
+        if (!createTableResponse.ok) {
+          const error = await createTableResponse.json();
+          throw new Error(error.error || "Failed to create table");
+        }
+      }
+
+      // Now create the column
       const response = await fetch(`/api/tables/${itemId}/columns`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -422,25 +531,49 @@ export function TableView({ itemId, itemName }: TableViewProps) {
     if (!editingColumn) return
 
     try {
+      console.log('Updating column:', { editingColumn, newColumn });
+
+      // Clean column name
+      const columnName = newColumn.name
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, '_')
+        .replace(/[^a-z0-9_]/g, '');
+
+      const updateData = {
+        column_name: columnName,
+        display_name: newColumn.name.trim(),
+        data_type: newColumn.data_type,
+        is_required: newColumn.is_required,
+        default_value: newColumn.default_value?.trim() || null
+      };
+
+      console.log('Sending update data:', updateData);
+
       const response = await fetch(`/api/tables/${itemId}/columns/${editingColumn.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(newColumn),
-      })
+        body: JSON.stringify(updateData),
+      });
 
       if (!response.ok) {
-        throw new Error("Failed to update column")
+        const error = await response.json();
+        console.error('Failed to update column:', error);
+        throw new Error(error.error || "Failed to update column");
       }
 
-      setEditingColumn(null)
-      setNewColumn({ name: "", data_type: "text", is_required: false, default_value: "" })
-      setShowColumnDialog(false)
-      loadTableData() // Reload to refresh Tabulator
+      const updatedColumn = await response.json();
+      console.log('Column updated successfully:', updatedColumn);
+
+      setEditingColumn(null);
+      setNewColumn({ name: "", data_type: "text", is_required: false, default_value: "" });
+      setShowColumnDialog(false);
+      await loadTableData(); // Reload to refresh Tabulator
 
       toast({
         title: "Success",
         description: "Column updated successfully",
-      })
+      });
     } catch (error) {
       console.error("Error updating column:", error)
       toast({
@@ -481,7 +614,7 @@ export function TableView({ itemId, itemName }: TableViewProps) {
     if (column) {
       setEditingColumn(column)
       setNewColumn({
-        name: column.name,
+        name: column.column_name,
         data_type: column.data_type,
         is_required: column.is_required,
         default_value: column.default_value || "",
@@ -644,7 +777,7 @@ export function TableView({ itemId, itemName }: TableViewProps) {
                 {columns.map((column) => (
                   <div key={column.id} className="flex items-center justify-between p-2 border rounded">
                     <div>
-                      <span className="font-medium">{column.name}</span>
+                      <span className="font-medium">{column.display_name || column.column_name}</span>
                       <span className="text-sm text-muted-foreground ml-2">({column.data_type})</span>
                       {column.is_required && <span className="text-xs text-red-500 ml-2">Required</span>}
                     </div>

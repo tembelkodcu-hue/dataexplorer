@@ -78,17 +78,41 @@ export async function DELETE(
     const numericId = Number.parseInt(id);
     if (isNaN(numericId)) {
       console.log('Invalid ID:', id);
-      return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
+      return NextResponse.json({ 
+        error: "Invalid ID",
+        details: "ID must be a number"
+      }, { 
+        status: 400,
+        headers: {
+          'Cache-Control': 'no-cache'
+        }
+      });
     }
 
     console.log('Attempting to delete item with ID:', numericId);
     await DatabaseService.deleteSidebarItem(numericId);
     console.log('Successfully deleted item with ID:', numericId);
     
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ 
+      success: true,
+      message: "Item and all its contents deleted successfully" 
+    }, { 
+      headers: {
+        'Cache-Control': 'no-cache'
+      }
+    });
   } catch (error) {
     console.error("Error deleting sidebar item:", error);
     const message = error instanceof Error ? error.message : "Failed to delete sidebar item";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const details = error instanceof Error ? error.stack : undefined;
+    return NextResponse.json({ 
+      error: message,
+      details 
+    }, { 
+      status: 500,
+      headers: {
+        'Cache-Control': 'no-cache'
+      }
+    });
   }
 }
